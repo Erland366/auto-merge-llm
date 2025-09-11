@@ -56,21 +56,37 @@ class MergeMethod(ABC):
         params,
         model
     ):
+        size_mismatches = []
+        
         for param_name, param_value in model.named_parameters():
             if param_name in params:
                 # Handle size mismatches due to tokenizer alignment
                 if param_value.shape != params[param_name].shape:
-                    # Only copy the overlapping part
-                    min_shape = tuple(min(a, b) for a, b in zip(param_value.shape, params[param_name].shape))
-                    slices = tuple(slice(0, s) for s in min_shape)
-                    param_value.data[slices].copy_(params[param_name][slices])
-                    
-                    # Log the size mismatch
-                    logger.warning(f"Size mismatch for parameter {param_name}: "
-                                 f"model shape {param_value.shape}, param shape {params[param_name].shape}. "
-                                 f"Only copied overlapping part {min_shape}.")
+                    # Instead of silently handling, collect all mismatches
+                    size_mismatches.append({
+                        'param_name': param_name,
+                        'model_shape': param_value.shape,
+                        'param_shape': params[param_name].shape
+                    })
                 else:
                     param_value.data.copy_(params[param_name])
+        
+        # If there are any size mismatches, raise an error with detailed information
+        if size_mismatches:
+            error_msg = "Model merging failed due to parameter size mismatches:\n\n"
+            for mismatch in size_mismatches:
+                error_msg += f"Parameter: {mismatch['param_name']}\n"
+                error_msg += f"  Model shape: {mismatch['model_shape']}\n"
+                error_msg += f"  Param shape: {mismatch['param_shape']}\n\n"
+            
+            error_msg += "This indicates that the models have incompatible architectures or tokenizer configurations.\n"
+            error_msg += "Possible solutions:\n"
+            error_msg += "1. Ensure all models use the same base architecture\n"
+            error_msg += "2. Check tokenizer compatibility across models\n"
+            error_msg += "3. Use models fine-tuned from the same base checkpoint\n"
+            error_msg += "4. Consider using task arithmetic merging instead of direct parameter merging"
+            
+            raise ValueError(error_msg)
 
     def mask_params(
         self,
@@ -137,32 +153,65 @@ class MergeMethod(ABC):
         model_path
     ):
         res = {}
+        
+        # Parse model path to extract subfolder if present
+        subfolder = None
+        actual_model_path = model_path
+        
+        # Check if model_path contains subfolder information (format: model_name@subfolder)
+        if '@' in model_path:
+            actual_model_path, subfolder = model_path.split('@', 1)
+            logger.info(f"Loading model {actual_model_path} from subfolder: {subfolder}")
+        
         try:
-            temp_model_path = get_model_storage_path(model_path)
-            res['model'] = ModelRegistry.load_model(
-                model_path=temp_model_path,
-                device_map="cpu"
-            )
-            res['tokenizer'] = AutoTokenizer.from_pretrained(
-                pretrained_model_name_or_path=temp_model_path
-            )
-            res['config'] = AutoConfig.from_pretrained(
-                pretrained_model_name_or_path=temp_model_path
-            )
+            # For models with subfolders, don't use get_model_storage_path as it doesn't handle @ symbols
+            if subfolder:
+                res['model'] = ModelRegistry.load_model(
+                    model_path=actual_model_path,
+                    device_map="cpu",
+                    cache_dir=CACHE_DIR,
+                    subfolder=subfolder
+                )
+                res['tokenizer'] = AutoTokenizer.from_pretrained(
+                    pretrained_model_name_or_path=actual_model_path,
+                    cache_dir=CACHE_DIR,
+                    subfolder=subfolder
+                )
+                res['config'] = AutoConfig.from_pretrained(
+                    pretrained_model_name_or_path=actual_model_path,
+                    cache_dir=CACHE_DIR,
+                    subfolder=subfolder
+                )
+            else:
+                # For models without subfolders, use the original logic
+                temp_model_path = get_model_storage_path(model_path)
+                res['model'] = ModelRegistry.load_model(
+                    model_path=temp_model_path,
+                    device_map="cpu"
+                )
+                res['tokenizer'] = AutoTokenizer.from_pretrained(
+                    pretrained_model_name_or_path=temp_model_path
+                )
+                res['config'] = AutoConfig.from_pretrained(
+                    pretrained_model_name_or_path=temp_model_path
+                )
         except Exception as e:
             logger.error(e)
             res['model'] = ModelRegistry.load_model(
-                model_path=model_path,
+                model_path=actual_model_path,
                 device_map="cpu",
-                cache_dir=CACHE_DIR
+                cache_dir=CACHE_DIR,
+                subfolder=subfolder
             )
             res['tokenizer'] = AutoTokenizer.from_pretrained(
-                pretrained_model_name_or_path=model_path, 
-                cache_dir=CACHE_DIR
+                pretrained_model_name_or_path=actual_model_path, 
+                cache_dir=CACHE_DIR,
+                subfolder=subfolder
             )
             res['config'] = AutoConfig.from_pretrained(
-                pretrained_model_name_or_path=model_path, 
-                cache_dir=CACHE_DIR
+                pretrained_model_name_or_path=actual_model_path, 
+                cache_dir=CACHE_DIR,
+                subfolder=subfolder
             )
         return res
             

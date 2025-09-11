@@ -50,19 +50,23 @@ class ModelRegistry:
     }
     
     @classmethod
-    def get_auto_model_class(cls, model_path):
+    def get_auto_model_class(cls, model_path, subfolder=None):
         """
         Get the appropriate AutoModel class for a given model path.
         
         Args:
             model_path: Path or identifier for the model
+            subfolder: Subfolder to load from (for hyperparameter tuning results)
             
         Returns:
             The appropriate AutoModel class
         """
         try:
             # First, try to load the config to determine the model type
-            config = AutoConfig.from_pretrained(model_path)
+            if subfolder:
+                config = AutoConfig.from_pretrained(model_path, subfolder=subfolder)
+            else:
+                config = AutoConfig.from_pretrained(model_path)
             
             # Check if it's a task-specific model
             if hasattr(config, 'architectures') and config.architectures:
@@ -90,23 +94,48 @@ class ModelRegistry:
             return AutoModel
     
     @classmethod
-    def load_model(cls, model_path, device_map="cpu", **kwargs):
+    def load_model(cls, model_path, device_map="cpu", subfolder=None, **kwargs):
         """
         Load a model with the appropriate architecture.
         
         Args:
             model_path: Path or identifier for the model
             device_map: Device mapping for the model
+            subfolder: Subfolder to load from (for hyperparameter tuning results)
             **kwargs: Additional arguments for from_pretrained
             
         Returns:
             Loaded model
         """
-        auto_model_class = cls.get_auto_model_class(model_path)
+        auto_model_class = cls.get_auto_model_class(model_path, subfolder)
         
         # Handle cache_dir separately as it's not a direct parameter
         cache_dir = kwargs.pop('cache_dir', None)
         
+        # If subfolder is specified, load from that subfolder
+        if subfolder:
+            print(f"Loading model {model_path} from subfolder: {subfolder}")
+            try:
+                if cache_dir:
+                    return auto_model_class.from_pretrained(
+                        pretrained_model_name_or_path=model_path,
+                        subfolder=subfolder,
+                        device_map=device_map,
+                        cache_dir=cache_dir,
+                        **kwargs
+                    )
+                else:
+                    return auto_model_class.from_pretrained(
+                        pretrained_model_name_or_path=model_path,
+                        subfolder=subfolder,
+                        device_map=device_map,
+                        **kwargs
+                    )
+            except Exception as e:
+                print(f"Warning: Failed to load {model_path} from subfolder {subfolder}: {e}")
+                print(f"Falling back to loading base model without subfolder...")
+        
+        # Fall back to loading without subfolder
         if cache_dir:
             return auto_model_class.from_pretrained(
                 pretrained_model_name_or_path=model_path,

@@ -18,6 +18,10 @@ def align_tokenizers_and_embeddings(
             "Vocab size of pretrained model is %d .",
             pretrained_vocab_size
         )
+        
+        # Check for extreme vocabulary size differences before alignment
+        max_vocab_diff = 1000  # Maximum allowed vocabulary size difference
+        vocab_size_issues = []
         pretrained_token_dict = json.loads(
             pretrained_tokenizer._tokenizer.to_str()
         )
@@ -76,7 +80,36 @@ def align_tokenizers_and_embeddings(
                     for token_dict in finetuned_added_pad_tokens
                 ]
             ))
+            
+            # Check for large vocabulary size differences
+            vocab_diff = abs(finetuned_vocab_size - pretrained_vocab_size)
+            if vocab_diff > max_vocab_diff:
+                vocab_size_issues.append({
+                    'model_index': index,
+                    'vocab_size': finetuned_vocab_size,
+                    'base_vocab_size': pretrained_vocab_size,
+                    'difference': vocab_diff
+                })
+                
         logger.info(f"All added pad tokens of finetuned models are {added_pad_tokens_set}.")
+        
+        # Raise error if there are significant vocabulary size differences
+        if vocab_size_issues:
+            error_msg = "Model merging failed due to significant vocabulary size differences:\n\n"
+            for issue in vocab_size_issues:
+                error_msg += f"Model {issue['model_index']}: vocab size {issue['vocab_size']} "
+                error_msg += f"(diff: {issue['difference']} from base {issue['base_vocab_size']})\n"
+            
+            error_msg += f"\nMaximum allowed difference is {max_vocab_diff} tokens.\n\n"
+            error_msg += "This indicates that the models have incompatible tokenizers or have been "
+            error_msg += "fine-tuned with significantly different vocabulary configurations.\n\n"
+            error_msg += "Possible solutions:\n"
+            error_msg += "1. Use models fine-tuned from the same base checkpoint\n"
+            error_msg += "2. Ensure all models use compatible tokenizer configurations\n"
+            error_msg += "3. Check that models haven't been trained with extensive custom vocabularies\n"
+            error_msg += "4. Consider using task arithmetic merging instead of direct parameter merging"
+            
+            raise ValueError(error_msg)
 
         # align the tokenizers
         aligned_models_vocab_size_set = set()
@@ -137,7 +170,22 @@ def align_tokenizers_and_embeddings(
                 embed_shape = model.get_input_embeddings().weight.shape
             
             aligned_models_vocab_size_set.add(embed_shape)
-        assert len(aligned_models_vocab_size_set) == 1
+        
+        # Log the current state of aligned models
+        logger.info(f"Current aligned model vocab sizes: {aligned_models_vocab_size_set}")
+        
+        # Check if all models have the same embedding size after alignment
+        if len(aligned_models_vocab_size_set) > 1:
+            error_msg = f"Tokenizer alignment failed: models have different embedding sizes after alignment: {aligned_models_vocab_size_set}\n\n"
+            error_msg += "This indicates that the models have incompatible tokenizer configurations or architectures.\n"
+            error_msg += "Possible solutions:\n"
+            error_msg += "1. Ensure all models are fine-tuned from the same base checkpoint\n"
+            error_msg += "2. Check that all models use the same tokenizer configuration\n"
+            error_msg += "3. Verify that models haven't been fine-tuned with different special tokens\n"
+            error_msg += "4. Use models with compatible vocabulary sizes"
+            
+            logger.error(error_msg)
+            raise ValueError(error_msg)
     except Exception as e:
         logger.error(traceback.print_exc())
         logger.warning(

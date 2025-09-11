@@ -53,12 +53,47 @@ class LinearMerging(MergeMethod):
                 )  
         with torch.no_grad():
             merged_params = {}
+            shape_mismatches = []
+            
             for param_name, model_to_merge_param in models_to_merge_param_dict.items():
-                # Compute the weighted sum instead of a mean
-                weighted_sum = sum(
-                    weight * param for weight, param in zip(weights, model_to_merge_param)
-                )
-                merged_params[param_name] = weighted_sum
+                # Check if all tensors have the same shape
+                base_shape = model_to_merge_param[0].shape
+                for i, param in enumerate(model_to_merge_param[1:], 1):
+                    if param.shape != base_shape:
+                        shape_mismatches.append({
+                            'param_name': param_name,
+                            'base_shape': base_shape,
+                            'model_index': i,
+                            'mismatched_shape': param.shape
+                        })
+                        break
+                
+                if not any(m['param_name'] == param_name for m in shape_mismatches):
+                    # Only merge if shapes are compatible
+                    weighted_sum = sum(
+                        weight * param for weight, param in zip(weights, model_to_merge_param)
+                    )
+                    merged_params[param_name] = weighted_sum
+            
+            # Raise error if there are shape mismatches
+            if shape_mismatches:
+                error_msg = "Model merging failed due to tensor shape mismatches:\n\n"
+                for mismatch in shape_mismatches[:10]:  # Show first 10 mismatches
+                    error_msg += f"Parameter: {mismatch['param_name']}\n"
+                    error_msg += f"  Expected shape: {mismatch['base_shape']}\n"
+                    error_msg += f"  Model {mismatch['model_index']} shape: {mismatch['mismatched_shape']}\n\n"
+                
+                if len(shape_mismatches) > 10:
+                    error_msg += f"... and {len(shape_mismatches) - 10} more mismatches\n\n"
+                
+                error_msg += "This indicates that the models have incompatible architectures or layer configurations.\n"
+                error_msg += "Possible solutions:\n"
+                error_msg += "1. Ensure all models use the same base architecture\n"
+                error_msg += "2. Check that all models have the same number of layers and hidden dimensions\n"
+                error_msg += "3. Use models fine-tuned from the same base checkpoint\n"
+                error_msg += "4. Consider using task arithmetic merging instead of direct parameter merging"
+                
+                raise ValueError(error_msg)
         
         return self.finalize_merge(
             base_model, 

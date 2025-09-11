@@ -27,6 +27,9 @@ def get_model_storage_path(model_name):
     if os.path.isabs(model_name) or os.path.exists(model_name):
         return model_name
     CACHE_DIR = os.environ.get('TRANSFORMERS_CACHE')
+    if CACHE_DIR is None:
+        # Default to user's home directory cache
+        CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "transformers")
     model_folder_path = os.path.join(CACHE_DIR, 'models--' + model_name.replace('/', '--'))
     
     if not os.path.exists(model_folder_path):
