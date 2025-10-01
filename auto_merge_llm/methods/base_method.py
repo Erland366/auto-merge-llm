@@ -10,7 +10,8 @@ from auto_merge_llm.tokenizer import align_tokenizers_and_embeddings
 from auto_merge_llm.utils import get_model_storage_path, logger, get_param_names_to_merge
 from auto_merge_llm.utils.model_registry import ModelRegistry
 
-CACHE_DIR = os.environ.get('TRANSFORMERS_CACHE', os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "transformers"))
+CACHE_DIR = os.environ.get('TRANSFORMERS_CACHE', os.path.join(os.path.expanduser("~"), ".cache", "huggingface"))
+HUB_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
 
 
 class MergeMethod(ABC):
@@ -148,71 +149,153 @@ class MergeMethod(ABC):
                         model_params[name].data[mask] = base_params[name].data[mask]
     
         
+    def _load_model_from_cache(self, model_name, subfolder=None):
+        """
+        Load model directly from HuggingFace cache without accessing internet.
+        """
+        # Convert model name to cache directory name
+        cache_model_name = model_name.replace('/', '--')
+
+        # Find the model in cache
+        model_cache_path = os.path.join(HUB_CACHE_DIR, f"models--{cache_model_name}")
+
+        if not os.path.exists(model_cache_path):
+            raise ValueError(f"Model {model_name} not found in cache at {model_cache_path}")
+
+        # Find the latest snapshot
+        snapshots_dir = os.path.join(model_cache_path, "snapshots")
+        if not os.path.exists(snapshots_dir):
+            raise ValueError(f"No snapshots found for model {model_name} in cache")
+
+        # Get the most recent snapshot
+        snapshots = [d for d in os.listdir(snapshots_dir) if os.path.isdir(os.path.join(snapshots_dir, d))]
+        if not snapshots:
+            raise ValueError(f"No snapshot directories found for model {model_name}")
+
+        latest_snapshot = sorted(snapshots)[-1]
+        snapshot_path = os.path.join(snapshots_dir, latest_snapshot)
+
+        # If subfolder is specified, use that path
+        if subfolder:
+            model_path = os.path.join(snapshot_path, subfolder)
+            if not os.path.exists(model_path):
+                raise ValueError(f"Subfolder {subfolder} not found in cache for model {model_name}")
+        else:
+            model_path = snapshot_path
+
+        logger.info(f"Loading model {model_name} from cache: {model_path}")
+        return model_path
+
     def _load_checkpoint(
-        self,
-        model_path
-    ):
+            self,
+            model_path
+        ):
         res = {}
-        
+
         # Parse model path to extract subfolder if present
         subfolder = None
         actual_model_path = model_path
-        
+
         # Check if model_path contains subfolder information (format: model_name@subfolder)
         if '@' in model_path:
             actual_model_path, subfolder = model_path.split('@', 1)
             logger.info(f"Loading model {actual_model_path} from subfolder: {subfolder}")
-        
+
         try:
-            # For models with subfolders, don't use get_model_storage_path as it doesn't handle @ symbols
-            if subfolder:
+            # First try to load from cache
+            if actual_model_path.startswith('haryoaw/'):
+                # For haryoaw models, always use cache since they're deleted from HF
+                cached_model_path = self._load_model_from_cache(actual_model_path, subfolder)
+
                 res['model'] = ModelRegistry.load_model(
-                    model_path=actual_model_path,
+                    model_path=cached_model_path,
                     device_map="cpu",
-                    cache_dir=CACHE_DIR,
-                    subfolder=subfolder
+                    local_files_only=True
                 )
                 res['tokenizer'] = AutoTokenizer.from_pretrained(
-                    pretrained_model_name_or_path=actual_model_path,
-                    cache_dir=CACHE_DIR,
-                    subfolder=subfolder
+                    pretrained_model_name_or_path=cached_model_path,
+                    local_files_only=True
                 )
                 res['config'] = AutoConfig.from_pretrained(
-                    pretrained_model_name_or_path=actual_model_path,
-                    cache_dir=CACHE_DIR,
-                    subfolder=subfolder
+                    pretrained_model_name_or_path=cached_model_path,
+                    local_files_only=True
                 )
             else:
-                # For models without subfolders, use the original logic
-                temp_model_path = get_model_storage_path(model_path)
-                res['model'] = ModelRegistry.load_model(
-                    model_path=temp_model_path,
-                    device_map="cpu"
-                )
-                res['tokenizer'] = AutoTokenizer.from_pretrained(
-                    pretrained_model_name_or_path=temp_model_path
-                )
-                res['config'] = AutoConfig.from_pretrained(
-                    pretrained_model_name_or_path=temp_model_path
-                )
+                # For non-haryoaw models, use the original logic
+                if subfolder:
+                    res['model'] = ModelRegistry.load_model(
+                        model_path=actual_model_path,
+                        device_map="cpu",
+                        cache_dir=CACHE_DIR,
+                        subfolder=subfolder,
+                        local_files_only=True
+                    )
+                    res['tokenizer'] = AutoTokenizer.from_pretrained(
+                        pretrained_model_name_or_path=actual_model_path,
+                        cache_dir=CACHE_DIR,
+                        subfolder=subfolder,
+                        local_files_only=True
+                    )
+                    res['config'] = AutoConfig.from_pretrained(
+                        pretrained_model_name_or_path=actual_model_path,
+                        cache_dir=CACHE_DIR,
+                        subfolder=subfolder,
+                        local_files_only=True
+                    )
+                else:
+                    # For models without subfolders, use the original logic
+                    temp_model_path = get_model_storage_path(model_path)
+                    res['model'] = ModelRegistry.load_model(
+                        model_path=temp_model_path,
+                        device_map="cpu",
+                        local_files_only=True
+                    )
+                    res['tokenizer'] = AutoTokenizer.from_pretrained(
+                        pretrained_model_name_or_path=temp_model_path,
+                        local_files_only=True
+                    )
+                    res['config'] = AutoConfig.from_pretrained(
+                        pretrained_model_name_or_path=temp_model_path,
+                        local_files_only=True
+                    )
+
         except Exception as e:
-            logger.error(e)
-            res['model'] = ModelRegistry.load_model(
-                model_path=actual_model_path,
-                device_map="cpu",
-                cache_dir=CACHE_DIR,
-                subfolder=subfolder
-            )
-            res['tokenizer'] = AutoTokenizer.from_pretrained(
-                pretrained_model_name_or_path=actual_model_path, 
-                cache_dir=CACHE_DIR,
-                subfolder=subfolder
-            )
-            res['config'] = AutoConfig.from_pretrained(
-                pretrained_model_name_or_path=actual_model_path, 
-                cache_dir=CACHE_DIR,
-                subfolder=subfolder
-            )
+            logger.error(f"Failed to load model from cache: {e}")
+            # Try again without local_files_only as a last resort
+            try:
+                if subfolder:
+                    res['model'] = ModelRegistry.load_model(
+                        model_path=actual_model_path,
+                        device_map="cpu",
+                        cache_dir=CACHE_DIR,
+                        subfolder=subfolder
+                    )
+                    res['tokenizer'] = AutoTokenizer.from_pretrained(
+                        pretrained_model_name_or_path=actual_model_path,
+                        cache_dir=CACHE_DIR,
+                        subfolder=subfolder
+                    )
+                    res['config'] = AutoConfig.from_pretrained(
+                        pretrained_model_name_or_path=actual_model_path,
+                        cache_dir=CACHE_DIR,
+                        subfolder=subfolder
+                    )
+                else:
+                    temp_model_path = get_model_storage_path(model_path)
+                    res['model'] = ModelRegistry.load_model(
+                        model_path=temp_model_path,
+                        device_map="cpu"
+                    )
+                    res['tokenizer'] = AutoTokenizer.from_pretrained(
+                        pretrained_model_name_or_path=temp_model_path
+                    )
+                    res['config'] = AutoConfig.from_pretrained(
+                        pretrained_model_name_or_path=temp_model_path
+                    )
+            except Exception as e2:
+                logger.error(f"Failed to load model completely: {e2}")
+                raise e2
+
         return res
             
     def _load_checkpoints(
