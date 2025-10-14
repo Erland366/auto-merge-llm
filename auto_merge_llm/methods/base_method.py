@@ -153,10 +153,8 @@ class MergeMethod(ABC):
         """
         Load model directly from HuggingFace cache without accessing internet.
         """
-        # Convert model name to cache directory name
         cache_model_name = model_name.replace('/', '--')
 
-        # Find the model in cache
         model_cache_path = os.path.join(HUB_CACHE_DIR, f"models--{cache_model_name}")
 
         if not os.path.exists(model_cache_path):

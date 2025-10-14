@@ -1,6 +1,7 @@
 from .linear import LinearMerging
 from .breadcrumbs import BreadcrumbsMerging
-from .fisher import FisherMerging, SimplifiedFisherMerging, DatasetEnabledFisherMerging
+from .fisher import FisherMerging, SimplifiedFisherMerging
+from .fisher_dataset import DatasetEnabledFisherMerging
 from .regmean import RegmeanMerging
 from .slerp import SlerpMerging
 from .stock import StockMerging

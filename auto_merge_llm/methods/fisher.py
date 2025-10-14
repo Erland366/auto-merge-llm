@@ -168,7 +168,7 @@ class FisherMerging(MergeMethod):
                 for param_name, param_value in model_to_merge.named_parameters()
             }
             # exclude parameter whose name matches element in exclude_param_names_regex
-            param_names_to_merge = self.get_param_names_to_merge(
+            param_names_to_merge = get_param_names_to_merge(
                 input_param_names=list(param_dict.keys()),
                 exclude_param_names_regex=exclude_param_names_regex
             )
@@ -186,9 +186,9 @@ class FisherMerging(MergeMethod):
             train_dataloader = trainer.get_train_dataloader()
             if num_fisher_examples % trainer._train_batch_size != 0:
                 print(
-                    "warning: the number of examples for computing fisher cannot be fully "
-                    "divided by the batch size for model %d, which may lead to a "
-                    "slightly different number of the actually used examples.", model_idx
+                    f"warning: the number of examples for computing fisher cannot be fully "
+                    f"divided by the batch size for model {model_idx}, which may lead to a "
+                    f"slightly different number of the actually used examples."
                 )
             for step, inputs in tqdm(
                 enumerate(train_dataloader), 
@@ -196,7 +196,20 @@ class FisherMerging(MergeMethod):
             ):
                 if num_computed_examples >= num_fisher_examples:
                     break
+                # Prepare and, if needed, trim the last batch to avoid overrun
                 inputs = trainer._prepare_inputs(inputs)
+                # Infer actual batch size from inputs
+                try:
+                    any_tensor = next(iter(inputs.values()))
+                    actual_bs = int(any_tensor.shape[0])
+                except Exception:
+                    actual_bs = trainer._train_batch_size
+                remaining = num_fisher_examples - num_computed_examples
+                if actual_bs > remaining:
+                    # Trim tensors in the batch to 'remaining' examples
+                    inputs = {k: (v[:remaining] if hasattr(v, 'shape') and v.shape[0] >= remaining else v)
+                              for k, v in inputs.items()}
+                    actual_bs = remaining
                 outputs = model_to_merge(**inputs)
                 # Tensor, shape (batch_size, num_label_classes)
                 logits = outputs.logits
@@ -238,7 +251,7 @@ class FisherMerging(MergeMethod):
                     )
 
                 batches_fisher_weights_list.append(batch_fisher_weights)
-                num_computed_examples += trainer._train_batch_size
+                num_computed_examples += actual_bs
 
             model_to_merge_fisher_weights = {}
             for batch_fisher_weights in batches_fisher_weights_list:
@@ -280,8 +293,10 @@ class FisherMerging(MergeMethod):
             minimal_fisher_weight=minimal_fisher_weight
         )
         
+        # Use the instantiated base model object (not the string path)
+        base_model_instance = base_model_dict['model']
         return self.finalize_merge(
-            base_model, 
+            base_model_instance, 
             base_model_dict,
             merging_model_list, 
             merged_params
@@ -334,6 +349,16 @@ class SimplifiedFisherMerging(MergeMethod):
         models_to_merge_param_dict = defaultdict(list)
         base_model = base_model_dict['model']
 
+        # Extract URIEL weights if provided
+        uriel_weights = method_params.get('weights', None)
+        if uriel_weights is not None:
+            # Convert to tensor and normalize
+            uriel_weights = torch.tensor(uriel_weights, dtype=torch.float32)
+            uriel_weights = uriel_weights / (uriel_weights.sum() + 1e-8)
+            print(f"Using URIEL weights for Fisher merging: {uriel_weights.tolist()}")
+        else:
+            print("No URIEL weights provided, using pure Fisher merging")
+
         # iterate each individual model that needs to be merged
         for model_to_merge_dict in merging_model_list:
             model_to_merge = model_to_merge_dict['model']
@@ -366,12 +391,29 @@ class SimplifiedFisherMerging(MergeMethod):
                 # Normalize Fisher weights
                 fisher_weights = fisher_weights / (fisher_weights.sum() + 1e-8)
 
+                # Combine Fisher weights with URIEL weights if provided
+                if uriel_weights is not None:
+                    # Ensure uriel_weights matches the number of models
+                    if len(uriel_weights) != len(model_to_merge_param):
+                        print(f"Warning: URIEL weights count ({len(uriel_weights)}) != models count ({len(model_to_merge_param)})")
+                        # Use equal weights as fallback
+                        combined_weights = fisher_weights
+                    else:
+                        # Combine Fisher and URIEL weights (element-wise multiplication)
+                        # This gives us parameter-level importance weighted by model-level similarity
+                        uriel_reshaped = uriel_weights.reshape(-1, *[1 for _ in range(param_values.dim() - 1)])
+                        combined_weights = fisher_weights.unsqueeze(-1) * uriel_reshaped.squeeze(-1)
+                        # Normalize combined weights
+                        combined_weights = combined_weights / (combined_weights.sum() + 1e-8)
+                else:
+                    combined_weights = fisher_weights
+
                 # Reshape for broadcasting
-                reshaped_weights = fisher_weights.reshape(
+                reshaped_weights = combined_weights.reshape(
                     -1, *[1 for _ in range(param_values.dim() - 1)]
                 )
 
-                # Weighted average using Fisher weights
+                # Weighted average using combined Fisher+URIEL weights
                 merged_param = (reshaped_weights * param_values).sum(dim=0)
                 merged_params[param_name] = merged_param
 
@@ -390,165 +432,17 @@ class SimplifiedFisherMerging(MergeMethod):
         mask_merging=None,
         tensor_name="default"
     ):
-        # Simplified tensor merging using magnitude-based Fisher proxy
         stacked_tensors = torch.stack([
             merging_tensor
             for merging_tensor in tensors_to_merge
         ], dim=0)
 
-        # Use tensor magnitudes as Fisher information proxy
         fisher_weights = torch.norm(stacked_tensors, dim=tuple(range(1, stacked_tensors.dim())))
         fisher_weights = fisher_weights / (fisher_weights.sum() + 1e-8)
 
-        # Reshape for broadcasting
         reshaped_weights = fisher_weights.reshape(
             -1, *[1 for _ in range(stacked_tensors.dim() - 1)]
         )
 
-        # Weighted average using Fisher weights
         merged_tensor = (reshaped_weights * stacked_tensors).sum(dim=0)
         return merged_tensor
-
-
-class DatasetEnabledFisherMerging(FisherMerging):
-    """
-    Dataset-enabled Fisher merging that can work with huggingface datasets.
-    Automatically creates trainers from dataset specifications.
-    """
-
-    def create_trainer_from_dataset(self, model, dataset_config, num_examples=100):
-        """
-        Create a simple trainer object from dataset configuration.
-
-        Args:
-            model: The model to create trainer for
-            dataset_config: dict with dataset configuration
-                - dataset_name: str, huggingface dataset name
-                - dataset_split: str, dataset split (default: 'train')
-                - text_column: str, column containing text data
-                - label_column: str, column containing labels
-            num_examples: int, number of examples to use for Fisher computation
-
-        Returns:
-            SimpleTrainer object
-        """
-        try:
-            from datasets import load_dataset
-            from torch.utils.data import DataLoader
-            import torch
-            from transformers import AutoTokenizer
-
-            # Load dataset
-            dataset = load_dataset(dataset_config['dataset_name'], split=dataset_config.get('dataset_split', 'train'))
-
-            # Take subset of examples
-            if len(dataset) > num_examples:
-                dataset = dataset.shuffle(seed=42).select(range(num_examples))
-
-            # Get tokenizer from model
-            if hasattr(model, 'config'):
-                tokenizer = AutoTokenizer.from_pretrained(model.config._name_or_path)
-            else:
-                # Fallback to common tokenizer
-                tokenizer = AutoTokenizer.from_pretrained("xlm-roberta-base")
-
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
-
-            # Tokenize data
-            def tokenize_function(examples):
-                return tokenizer(
-                    examples[dataset_config['text_column']],
-                    truncation=True,
-                    padding='max_length',
-                    max_length=128,
-                    return_tensors="pt"
-                )
-
-            tokenized_dataset = dataset.map(tokenize_function, batched=True)
-            tokenized_dataset = tokenized_dataset.remove_columns([col for col in dataset.column_names if col not in [dataset_config['text_column'], dataset_config['label_column']]])
-
-            # Convert to torch format
-            tokenized_dataset.set_format('torch')
-
-            # Create simple trainer-like object
-            class SimpleTrainer:
-                def __init__(self, model, dataset, tokenizer, batch_size=8):
-                    self.model = model
-                    self.dataset = dataset
-                    self.tokenizer = tokenizer
-                    self._train_batch_size = batch_size
-                    self.dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-                def get_train_dataloader(self):
-                    return self.dataloader
-
-                def _prepare_inputs(self, inputs):
-                    # Move inputs to model device
-                    device = next(self.model.parameters()).device
-                    return {k: v.to(device) for k, v in inputs.items()}
-
-            return SimpleTrainer(model, tokenized_dataset, tokenizer)
-
-        except Exception as e:
-            logger.error(f"Failed to create trainer from dataset: {e}")
-            return None
-
-    def merge(
-        self,
-        base_model,
-        models_to_merge,
-        method_params,
-        mask_merging=None,
-        exclude_param_names_regex=[]
-    ):
-        # Extract dataset configuration from method_params
-        dataset_config = method_params.get('dataset_config', None)
-        num_fisher_examples = method_params.get('num_fisher_examples', 100)
-
-        if dataset_config is None:
-            logger.warning("No dataset_config provided. Falling back to simplified Fisher merging.")
-            # Fallback to simplified Fisher merging
-            simple_fisher = SimplifiedFisherMerging()
-            return simple_fisher.merge(base_model, models_to_merge, method_params, mask_merging, exclude_param_names_regex)
-
-        # Prepare models and create trainers
-        base_model_dict, merging_model_list = self.prepare_merge(
-            base_model, models_to_merge, exclude_param_names_regex
-        )
-
-        # Create trainers for each model
-        trainers = []
-        for model_to_merge_dict in merging_model_list:
-            model = model_to_merge_dict['model']
-            trainer = self.create_trainer_from_dataset(model, dataset_config, num_fisher_examples)
-            if trainer is None:
-                logger.error(f"Failed to create trainer for model. Skipping Fisher merge.")
-                # Fallback to simplified Fisher merging
-                simple_fisher = SimplifiedFisherMerging()
-                return simple_fisher.merge(base_model, models_to_merge, method_params, mask_merging, exclude_param_names_regex)
-            trainers.append(trainer)
-
-        # Set up Fisher method parameters
-        fisher_method_params = {
-            "trainers": trainers,
-            "nums_fisher_examples": [num_fisher_examples] * len(trainers),
-            "normalize_fisher_weight": method_params.get('normalize_fisher_weight', True),
-            "minimal_fisher_weight": method_params.get('minimal_fisher_weight', 1e-6),
-            "fisher_scaling_coefficients": method_params.get('fisher_scaling_coefficients', None)
-        }
-
-        # Use parent class Fisher merging method
-        return super().merge(base_model, models_to_merge, fisher_method_params, mask_merging, exclude_param_names_regex)
-
-    def merge_tensor(
-        self,
-        base_tensor,
-        tensors_to_merge,
-        method_params,
-        mask_merging=None,
-        tensor_name="default"
-    ):
-        # Fall back to simplified tensor merging
-        simple_fisher = SimplifiedFisherMerging()
-        return simple_fisher.merge_tensor(base_tensor, tensors_to_merge, method_params, mask_merging, tensor_name)
