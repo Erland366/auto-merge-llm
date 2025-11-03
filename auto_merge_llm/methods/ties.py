@@ -124,7 +124,7 @@ class TiesMerging(MergeMethod):
         exclude_param_names_regex=[]
     ):
         """
-        ties merging method
+        tiesmerging method
         :param param_value_mask_rate: float, mask rate of the smallest-magnitude parameter values
         :param scaling_coefficient: float, scaling coefficient to merge the task vectors
         :return:
