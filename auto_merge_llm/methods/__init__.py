@@ -11,6 +11,7 @@ from .widen import WidenMerging
 from .passthrough import PassthroughMerging
 from .adamerging import AdaMergingMethod
 from .neuromerging import NeuroMerging
+from .directional_consensus import DirectionalConsensusMerging
 
 merging_methods_dict = {
     "linear": LinearMerging,
@@ -27,6 +28,7 @@ merging_methods_dict = {
     "passthrough": PassthroughMerging,
     "adamerging": AdaMergingMethod,
     "neuromerging": NeuroMerging,
+    "directional_consensus": DirectionalConsensusMerging,
 }
 
 
