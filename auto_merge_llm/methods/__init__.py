@@ -9,6 +9,8 @@ from .task_arithmetic import TaskArithmetic
 from .ties import TiesMerging
 from .widen import WidenMerging
 from .passthrough import PassthroughMerging
+from .adamerging import AdaMergingMethod
+from .neuromerging import NeuroMerging
 
 merging_methods_dict = {
     "linear": LinearMerging,
@@ -23,6 +25,8 @@ merging_methods_dict = {
     "ties": TiesMerging,
     "widen": WidenMerging,
     "passthrough": PassthroughMerging,
+    "adamerging": AdaMergingMethod,
+    "neuromerging": NeuroMerging,
 }
 
 

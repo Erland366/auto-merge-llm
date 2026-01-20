@@ -4,7 +4,8 @@ import copy
 import torch
 import torch.nn as nn
 
-from auto_merge_llm.utils import TaskVector
+from auto_merge_llm.utils import TaskVector, logger
+from auto_merge_llm.utils import apply_dare_to_task_vector, DAREConfig
 from .base_method import MergeMethod
 
 
@@ -116,9 +117,9 @@ class TiesMerging(MergeMethod):
         return merged_flattened_param
 
     def merge(
-        self, 
-        base_model, 
-        models_to_merge, 
+        self,
+        base_model,
+        models_to_merge,
         method_params,
         mask_merging=None,
         exclude_param_names_regex=[]
@@ -129,10 +130,13 @@ class TiesMerging(MergeMethod):
         :param scaling_coefficient: float, scaling coefficient to merge the task vectors
         :return:
         """
-        
+
         scaling_coefficient = method_params["scaling_coefficient"]
         param_value_mask_rate = method_params["param_value_mask_rate"]
-        
+
+        # DARE configuration
+        dare_config = DAREConfig.from_method_params(method_params)
+
         assert isinstance(scaling_coefficient, float), \
             "wrong type of scaling_coefficient, should be float!"
         base_model_dict, merging_model_list = self.prepare_merge(
@@ -147,6 +151,19 @@ class TiesMerging(MergeMethod):
             )
             for model_to_merge in merging_model_list
         ]
+
+        # Apply DARE preprocessing if enabled (before TIES magnitude masking)
+        if dare_config.enabled:
+            logger.info(f"Applying DARE with drop_rate={dare_config.drop_rate} before TIES")
+            for idx, task_vector in enumerate(models_to_merge_task_vectors):
+                seed = (dare_config.seed + idx) if dare_config.seed is not None else None
+                task_vector.task_vector_param_dict = apply_dare_to_task_vector(
+                    task_vector.task_vector_param_dict,
+                    drop_rate=dare_config.drop_rate,
+                    rescale=dare_config.rescale,
+                    seed=seed,
+                    inplace=False
+                )
         flattened_models_to_merge_param = [
             self.task_vector_param_dict_to_single_vector(
                 task_vector=task_vector
