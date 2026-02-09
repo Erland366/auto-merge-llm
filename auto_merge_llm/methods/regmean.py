@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from auto_merge_llm.utils import get_param_names_to_merge
+from auto_merge_llm.utils import get_param_names_to_merge, get_modules_to_merge
 from .base_method import MergeMethod
 
 
@@ -192,7 +192,7 @@ class RegmeanMerging(MergeMethod):
                         param_dict[param_name]
                     )
 
-                linear_modules_to_merge = self.get_modules_to_merge(
+                linear_modules_to_merge = get_modules_to_merge(
                     model=model_to_merge,
                     include_module_types=[nn.Linear]
                 )
@@ -241,10 +241,11 @@ class RegmeanMerging(MergeMethod):
                 reduce_non_diagonal_ratio=reduce_non_diagonal_ratio
             )
             
+        base_model_instance = base_model_dict['model']
         return self.finalize_merge(
-            base_model, 
+            base_model_instance,
             base_model_dict,
-            merging_model_list, 
+            merging_model_list,
             merged_params
         )
 

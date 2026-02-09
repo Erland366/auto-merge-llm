@@ -168,11 +168,15 @@ class AdaMergingMethod(MergeMethod):
         device = next(base_model_obj.parameters()).device
         logger.info(f"Optimizing coefficients on device: {device}")
 
-        # Get base model state dict for reference
+        # Keep a detached reference state and build merged parameters functionally.
+        # This preserves autograd from entropy loss -> coefficients.
         base_state_dict = {
-            name: param.clone()
+            name: param.clone().detach().to(device)
             for name, param in base_model_obj.named_parameters()
         }
+        for tv in task_vectors:
+            for name in tv.task_vector_param_dict:
+                tv.task_vector_param_dict[name] = tv.task_vector_param_dict[name].to(device)
 
         for iteration in range(num_iterations):
             total_entropy = 0.0
@@ -185,81 +189,88 @@ class AdaMergingMethod(MergeMethod):
                 else:
                     inputs = batch[0].to(device)
 
-                # Apply merged weights to model
-                self._apply_merged_weights(
-                    base_model_obj, base_state_dict, task_vectors, coefficients, mode
-                )
-
-                # Forward pass
-                with torch.enable_grad():
-                    outputs = base_model_obj(**inputs) if isinstance(inputs, dict) else base_model_obj(inputs)
-
-                    # Get logits (handle different output formats)
-                    if hasattr(outputs, 'logits'):
-                        logits = outputs.logits
-                    elif hasattr(outputs, 'last_hidden_state'):
-                        # For encoder models, use CLS token
-                        logits = outputs.last_hidden_state[:, 0, :]
-                    else:
-                        logits = outputs
-
-                    # Compute entropy
-                    probs = F.softmax(logits, dim=-1)
-                    entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1).mean()
-
-                    total_entropy += entropy
-                    num_batches += 1
-
-                # Backprop
                 optimizer.zero_grad()
+                merged_state = self._build_merged_state_dict(
+                    base_state_dict=base_state_dict,
+                    task_vectors=task_vectors,
+                    coefficients=coefficients,
+                    mode=mode,
+                )
+                if isinstance(inputs, dict):
+                    outputs = torch.func.functional_call(
+                        base_model_obj,
+                        merged_state,
+                        args=(),
+                        kwargs=inputs,
+                    )
+                else:
+                    outputs = torch.func.functional_call(
+                        base_model_obj,
+                        merged_state,
+                        args=(inputs,),
+                        kwargs={},
+                    )
+
+                # Get logits (handle different output formats)
+                if hasattr(outputs, 'logits'):
+                    logits = outputs.logits
+                elif hasattr(outputs, 'last_hidden_state'):
+                    # For encoder models, use CLS token
+                    logits = outputs.last_hidden_state[:, 0, :]
+                else:
+                    logits = outputs
+
+                # Compute entropy
+                probs = F.softmax(logits, dim=-1)
+                entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=-1).mean()
+
                 entropy.backward()
                 optimizer.step()
 
                 # Clamp coefficients to [0, 1]
                 with torch.no_grad():
                     coefficients.data.clamp_(0.0, 1.0)
+                    total_entropy += entropy.detach().item()
+                num_batches += 1
 
             if (iteration + 1) % 10 == 0:
                 avg_entropy = total_entropy / max(num_batches, 1)
                 logger.info(f"Iteration {iteration + 1}/{num_iterations}, Avg Entropy: {avg_entropy:.4f}")
 
-        # Restore base model weights
-        with torch.no_grad():
-            for name, param in base_model_obj.named_parameters():
-                param.copy_(base_state_dict[name])
-
         return coefficients.detach()
 
-    def _apply_merged_weights(
+    def _build_merged_state_dict(
         self,
-        model,
         base_state_dict: Dict[str, torch.Tensor],
         task_vectors: List[TaskVector],
         coefficients: torch.Tensor,
         mode: str
-    ):
-        """Apply merged weights to model for forward pass."""
+    ) -> Dict[str, torch.Tensor]:
+        """Build merged state dict while keeping coefficient gradients intact."""
+        merged_state = {}
         if mode == "task_wise":
             # coefficients: (num_models,)
-            for name, param in model.named_parameters():
-                merged_delta = torch.zeros_like(param)
+            for name, base_param in base_state_dict.items():
+                merged_delta = torch.zeros_like(base_param)
                 for idx, tv in enumerate(task_vectors):
                     if name in tv.task_vector_param_dict:
-                        merged_delta += coefficients[idx] * tv.task_vector_param_dict[name].to(param.device)
-                param.data = base_state_dict[name].to(param.device) + merged_delta
+                        merged_delta += coefficients[idx] * tv.task_vector_param_dict[name]
+                merged_state[name] = base_param + merged_delta
         else:
             # Layer-wise: coefficients (num_layers, num_models)
             layer_names = list(task_vectors[0].task_vector_param_dict.keys())
             name_to_layer_idx = {name: idx for idx, name in enumerate(layer_names)}
 
-            for name, param in model.named_parameters():
+            for name, base_param in base_state_dict.items():
+                merged_state[name] = base_param
                 if name in name_to_layer_idx:
                     layer_idx = name_to_layer_idx[name]
-                    merged_delta = torch.zeros_like(param)
+                    merged_delta = torch.zeros_like(base_param)
                     for model_idx, tv in enumerate(task_vectors):
                         if name in tv.task_vector_param_dict:
-                            merged_delta += coefficients[layer_idx, model_idx] * tv.task_vector_param_dict[name].to(param.device)
-                    param.data = base_state_dict[name].to(param.device) + merged_delta
+                            merged_delta += coefficients[layer_idx, model_idx] * tv.task_vector_param_dict[name]
+                    merged_state[name] = base_param + merged_delta
+        return merged_state
 
     def _merge_task_wise(
         self,
