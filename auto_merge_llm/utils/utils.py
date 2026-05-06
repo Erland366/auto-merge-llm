@@ -26,23 +26,24 @@ def seed_everything(seed):
 def get_model_storage_path(model_name):
     if os.path.isabs(model_name) or os.path.exists(model_name):
         return model_name
-    CACHE_DIR = os.environ.get('TRANSFORMERS_CACHE')
-    if CACHE_DIR is None:
-        # Default to user's home directory cache
-        CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "transformers")
-    model_folder_path = os.path.join(CACHE_DIR, 'models--' + model_name.replace('/', '--'))
-    
+    cache_dir = (
+        os.environ.get('TRANSFORMERS_CACHE')
+        or os.environ.get('HF_HUB_CACHE')
+        or os.path.join(os.environ.get('HF_HOME', os.path.expanduser('~/.cache/huggingface')), 'hub')
+    )
+    model_folder_path = os.path.join(cache_dir, 'models--' + model_name.replace('/', '--'))
+
     if not os.path.exists(model_folder_path):
         raise FileNotFoundError(f"model folder path doesn't exist: {model_folder_path}")
-    
+
     snapshots_dir = os.path.join(model_folder_path, 'snapshots')
     if not os.path.exists(snapshots_dir):
         raise FileNotFoundError(f"can not find snapshots dir: {snapshots_dir}")
-    
+
     snapshot_subdirs = os.listdir(snapshots_dir)
     if not snapshot_subdirs:
-        raise FileNotFoundError("no sub dir in ")
-    
+        raise FileNotFoundError(f"no snapshot subdirectory in {snapshots_dir}")
+
     snapshot_dir = os.path.join(snapshots_dir, snapshot_subdirs[0])
     return snapshot_dir
 
